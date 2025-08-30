@@ -1,0 +1,297 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: semaphore
+  labels:
+    name: semaphore
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: semaphore-config
+  namespace: semaphore
+data:
+  config.yaml: |
+    server:
+      repository_cloning:
+        enabled: true
+        storage:
+          path: "/var/lib/semaphore/clones"
+          max_size: "5GB"
+          cleanup_interval: "30m"
+        defaults:
+          ttl: "2h"
+          compression: "gzip"
+          shallow: true
+          depth: 1
+        limits:
+          max_concurrent_clones: 20
+          max_repository_size: "1GB"
+          rate_limit: 15
+        security:
+          allowed_hosts:
+            - "github.com"
+            - "gitlab.com"
+            - "bitbucket.org"
+            - "*.internal.company.com"
+          require_authentication: true
+          audit_logging: true
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: semaphore-secrets
+  namespace: semaphore
+type: Opaque
+data:
+  db-password: c2VtYXBob3JlMTIz  # semaphore123
+  admin-password: YWRtaW4xMjM=    # admin123
+  runner-token: cnVubmVyLXRva2VuLTEyMw==  # runner-token-123
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: semaphore-data
+  namespace: semaphore
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: semaphore-clone-storage
+  namespace: semaphore
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: semaphore
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: semaphore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:14
+        env:
+        - name: POSTGRES_DB
+          value: semaphore
+        - name: POSTGRES_USER
+          value: semaphore
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: semaphore-secrets
+              key: db-password
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: semaphore-server
+  namespace: semaphore
+spec:
+  selector:
+    app: semaphore-server
+  ports:
+    - port: 3000
+      targetPort: 3000
+  type: LoadBalancer
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semaphore-server
+  namespace: semaphore
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: semaphore-server
+  template:
+    metadata:
+      labels:
+        app: semaphore-server
+    spec:
+      containers:
+      - name: semaphore
+        image: semaphoreui/semaphore:v2.10.0-pro
+        ports:
+        - containerPort: 3000
+        env:
+        - name: SEMAPHORE_CONFIG_PATH
+          value: "/etc/semaphore/config.yaml"
+        - name: SEMAPHORE_DB_HOST
+          value: postgres
+        - name: SEMAPHORE_DB_NAME
+          value: semaphore
+        - name: SEMAPHORE_DB_USER
+          value: semaphore
+        - name: SEMAPHORE_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: semaphore-secrets
+              key: db-password
+        - name: SEMAPHORE_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: semaphore-secrets
+              key: admin-password
+        - name: SEMAPHORE_ADMIN_NAME
+          value: admin
+        - name: SEMAPHORE_ADMIN_EMAIL
+          value: admin@example.com
+        - name: SEMAPHORE_SERVER_SIDE_CLONING
+          value: "true"
+        - name: SEMAPHORE_CLONE_STORAGE_PATH
+          value: "/var/lib/semaphore/clones"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/semaphore
+        - name: clone-storage
+          mountPath: /var/lib/semaphore/clones
+        - name: data
+          mountPath: /var/lib/semaphore
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /api/ping
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/ping
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: semaphore-config
+      - name: clone-storage
+        persistentVolumeClaim:
+          claimName: semaphore-clone-storage
+      - name: data
+        persistentVolumeClaim:
+          claimName: semaphore-data
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semaphore-runner
+  namespace: semaphore
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: semaphore-runner
+  template:
+    metadata:
+      labels:
+        app: semaphore-runner
+    spec:
+      containers:
+      - name: runner
+        image: semaphoreui/runner:v2.10.0-pro
+        env:
+        - name: SEMAPHORE_SERVER_URL
+          value: "http://semaphore-server:3000"
+        - name: SEMAPHORE_RUNNER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: semaphore-secrets
+              key: runner-token
+        - name: SEMAPHORE_RUNNER_CLONING_MODE
+          value: "server_side"
+        - name: SEMAPHORE_RUNNER_FALLBACK_DIRECT
+          value: "false"
+        - name: SEMAPHORE_RUNNER_CLONE_TIMEOUT
+          value: "600s"
+        - name: SEMAPHORE_RUNNER_MAX_RETRIES
+          value: "3"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: semaphore
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
