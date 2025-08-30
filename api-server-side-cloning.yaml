@@ -1,0 +1,386 @@
+openapi: 3.0.3
+info:
+  title: Semaphore Pro - Server-Side Repository Cloning API
+  description: API for server-side repository cloning functionality
+  version: 1.0.0
+  contact:
+    name: Semaphore UI Team
+    url: https://semaphoreui.com
+    email: support@semaphoreui.com
+
+servers:
+  - url: https://semaphore.example.com/api/v1
+    description: Production server
+  - url: http://localhost:3000/api/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /repositories/clone:
+    post:
+      summary: Clone a repository on the server
+      description: Initiates server-side cloning of a git repository
+      operationId: cloneRepository
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloneRequest'
+            examples:
+              github_public:
+                summary: Public GitHub repository
+                value:
+                  repository_url: "https://github.com/semaphoreui/semaphore.git"
+                  branch: "main"
+                  shallow: true
+              gitlab_private:
+                summary: Private GitLab repository with token
+                value:
+                  repository_url: "https://gitlab.com/user/private-repo.git"
+                  branch: "develop"
+                  commit: "abc123def456"
+                  credentials:
+                    type: "token"
+                    data: "glpat-xxxxxxxxxxxxxxxxxxxx"
+      responses:
+        '200':
+          description: Clone initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloneResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden - insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /repositories/clone/{cloneId}/status:
+    get:
+      summary: Get clone status
+      description: Retrieves the current status of a repository clone operation
+      operationId: getCloneStatus
+      parameters:
+        - name: cloneId
+          in: path
+          required: true
+          description: Unique identifier for the clone operation
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Clone status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloneStatus'
+        '404':
+          description: Clone not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /repositories/download/{cloneId}:
+    get:
+      summary: Download repository archive
+      description: Downloads the cloned repository as a compressed archive
+      operationId: downloadRepository
+      parameters:
+        - name: cloneId
+          in: path
+          required: true
+          description: Unique identifier for the clone operation
+          schema:
+            type: string
+            format: uuid
+        - name: format
+          in: query
+          description: Archive format
+          schema:
+            type: string
+            enum: [zip, tar.gz]
+            default: tar.gz
+      responses:
+        '200':
+          description: Repository archive
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Clone not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: Clone expired or cleaned up
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /repositories/clone/{cloneId}:
+    delete:
+      summary: Cancel or cleanup clone
+      description: Cancels an ongoing clone operation or cleans up a completed clone
+      operationId: cancelClone
+      parameters:
+        - name: cloneId
+          in: path
+          required: true
+          description: Unique identifier for the clone operation
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Clone cancelled or cleaned up successfully
+        '404':
+          description: Clone not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    CloneRequest:
+      type: object
+      required:
+        - repository_url
+      properties:
+        repository_url:
+          type: string
+          format: uri
+          description: Git repository URL
+          example: "https://github.com/semaphoreui/semaphore.git"
+        branch:
+          type: string
+          description: Branch to clone (default: repository default branch)
+          example: "main"
+        commit:
+          type: string
+          description: Specific commit SHA to clone
+          example: "abc123def456789"
+        tag:
+          type: string
+          description: Specific tag to clone
+          example: "v1.0.0"
+        shallow:
+          type: boolean
+          description: Perform shallow clone (default: true)
+          default: true
+        depth:
+          type: integer
+          description: Clone depth for shallow clones
+          default: 1
+          minimum: 1
+        include_git_metadata:
+          type: boolean
+          description: Include .git directory in archive
+          default: false
+        credentials:
+          $ref: '#/components/schemas/Credentials'
+        options:
+          $ref: '#/components/schemas/CloneOptions'
+
+    Credentials:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum: [token, ssh, basic, none]
+          description: Type of authentication
+        data:
+          type: string
+          description: Authentication data (token, private key, or base64 encoded username:password)
+        username:
+          type: string
+          description: Username for basic authentication
+        password:
+          type: string
+          description: Password for basic authentication
+
+    CloneOptions:
+      type: object
+      properties:
+        cache_duration:
+          type: string
+          description: How long to keep the clone cached (duration string)
+          example: "1h"
+          default: "30m"
+        compression:
+          type: string
+          enum: [gzip, none]
+          description: Archive compression type
+          default: "gzip"
+        exclude_patterns:
+          type: array
+          items:
+            type: string
+          description: Patterns to exclude from the archive
+          example: ["*.log", "node_modules/", ".env"]
+
+    CloneResponse:
+      type: object
+      required:
+        - clone_id
+        - status
+      properties:
+        clone_id:
+          type: string
+          format: uuid
+          description: Unique identifier for the clone operation
+        status:
+          type: string
+          enum: [queued, cloning, ready, error]
+          description: Current status of the clone operation
+        download_url:
+          type: string
+          format: uri
+          description: URL to download the repository archive (available when status is 'ready')
+        expires_at:
+          type: string
+          format: date-time
+          description: When the clone will expire and be cleaned up
+        estimated_size:
+          type: integer
+          description: Estimated size of the repository in bytes
+
+    CloneStatus:
+      type: object
+      required:
+        - clone_id
+        - status
+      properties:
+        clone_id:
+          type: string
+          format: uuid
+          description: Unique identifier for the clone operation
+        status:
+          type: string
+          enum: [queued, cloning, ready, error, expired]
+          description: Current status of the clone operation
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Progress percentage (for cloning status)
+        error_message:
+          type: string
+          description: Error message if status is 'error'
+        download_url:
+          type: string
+          format: uri
+          description: URL to download the repository archive
+        expires_at:
+          type: string
+          format: date-time
+          description: When the clone will expire and be cleaned up
+        created_at:
+          type: string
+          format: date-time
+          description: When the clone operation was initiated
+        completed_at:
+          type: string
+          format: date-time
+          description: When the clone operation completed
+        size:
+          type: integer
+          description: Actual size of the cloned repository in bytes
+        commit_sha:
+          type: string
+          description: The actual commit SHA that was cloned
+        repository_info:
+          $ref: '#/components/schemas/RepositoryInfo'
+
+    RepositoryInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Repository name
+        description:
+          type: string
+          description: Repository description
+        default_branch:
+          type: string
+          description: Repository default branch
+        last_commit:
+          $ref: '#/components/schemas/CommitInfo'
+
+    CommitInfo:
+      type: object
+      properties:
+        sha:
+          type: string
+          description: Commit SHA
+        message:
+          type: string
+          description: Commit message
+        author:
+          type: string
+          description: Commit author
+        date:
+          type: string
+          format: date-time
+          description: Commit date
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          description: Additional error details
+        timestamp:
+          type: string
+          format: date-time
+          description: Error timestamp
